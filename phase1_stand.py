@@ -1,25 +1,29 @@
-import mujoco, mujoco.viewer, numpy as np, time
+import mujoco, mujoco.viewer, numpy as np, time, threading, tkinter as tk
 
 MODEL_PATH = "humanoids/g1_29dof_lock_waist_rev_1_0.xml"
 
-# End-effector sites defined in the XML
 EE_SITES = ["left_foot_site", "right_foot_site", "left_hand_site", "right_hand_site"]
+EE_LABELS = ["Left Foot", "Right Foot", "Left Hand", "Right Hand"]
+EE_COLORS = ["#3b82f6", "#eab308", "#ef4444", "#22c55e"]
 
-# Torque limits from XML actuatorfrcrange
-TORQUE_LIMITS = {
-    "left_hip_pitch_joint": 88, "left_hip_roll_joint": 139,
-    "left_hip_yaw_joint": 88, "left_knee_joint": 139,
-    "left_ankle_pitch_joint": 50,
-    "right_hip_pitch_joint": 88, "right_hip_roll_joint": 139,
-    "right_hip_yaw_joint": 88, "right_knee_joint": 139,
-    "right_ankle_pitch_joint": 50,
-    "waist_yaw_joint": 88,
-    "left_shoulder_pitch_joint": 25, "left_shoulder_roll_joint": 25,
-    "left_shoulder_yaw_joint": 25, "left_elbow_joint": 25,
-    "left_wrist_pitch_joint": 5,
-    "right_shoulder_pitch_joint": 25, "right_shoulder_roll_joint": 25,
-    "right_shoulder_yaw_joint": 25, "right_elbow_joint": 25,
-    "right_wrist_pitch_joint": 5,
+# Which joint DOFs each end-effector controls (indices into qvel/dof space)
+# Free joint uses DOFs 0-5, then hinge joints start at DOF 6
+LIMB_DOFS = {
+    "left_foot_site":  [],  # filled at runtime
+    "right_foot_site": [],
+    "left_hand_site":  [],
+    "right_hand_site": [],
+}
+
+LIMB_JOINTS = {
+    "left_foot_site":  ["left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
+                         "left_knee_joint", "left_ankle_pitch_joint"],
+    "right_foot_site": ["right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
+                         "right_knee_joint", "right_ankle_pitch_joint"],
+    "left_hand_site":  ["left_shoulder_pitch_joint", "left_shoulder_roll_joint",
+                         "left_shoulder_yaw_joint", "left_elbow_joint", "left_wrist_pitch_joint"],
+    "right_hand_site": ["right_shoulder_pitch_joint", "right_shoulder_roll_joint",
+                         "right_shoulder_yaw_joint", "right_elbow_joint", "right_wrist_pitch_joint"],
 }
 
 # ──────────────────────────────────────
@@ -28,27 +32,7 @@ TORQUE_LIMITS = {
 
 def load_model(path):
     model = mujoco.MjModel.from_xml_path(path)
-    data = mujoco.MjData(model)
-    return model, data
-
-def configure_physics(model):
-    model.opt.timestep = 0.0005
-    model.opt.iterations = 50
-    model.opt.ls_iterations = 50
-    model.opt.solver = 2
-
-    for i in range(model.ngeom):
-        model.geom_solref[i] = [0.02, 1.0]
-        model.geom_solimp[i] = [0.9, 0.95, 0.001, 0.5, 2.0]
-
-    for i in range(model.nv):
-        model.dof_damping[i] = 2.0
-
-    floor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
-    model.geom_friction[floor_id] = [1.5, 0.005, 0.001]
-    for i in range(model.ngeom):
-        if i != floor_id:
-            model.geom_friction[i] = [1.5, 0.005, 0.001]
+    return model, mujoco.MjData(model)
 
 def get_joint_map(model):
     jmap = {}
@@ -57,6 +41,16 @@ def get_joint_map(model):
         if name:
             jmap[name] = model.jnt_qposadr[i]
     return jmap
+
+def build_limb_dofs(model):
+    """Map each EE to the DOF indices of its kinematic chain."""
+    for site_name, joint_names in LIMB_JOINTS.items():
+        dofs = []
+        for jname in joint_names:
+            jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, jname)
+            if jid >= 0:
+                dofs.append(model.jnt_dofadr[jid])
+        LIMB_DOFS[site_name] = dofs
 
 def load_pose(model, joint_map, filename="g1_pose.txt"):
     q = np.copy(model.qpos0)
@@ -70,151 +64,171 @@ def load_pose(model, joint_map, filename="g1_pose.txt"):
         print("No pose file, using defaults.")
     return q
 
-def set_belly_up(data, q_target, z=0.25):
-    data.qpos[:] = q_target
-    data.qpos[0:3] = [0, 0, z]
-    data.qpos[3:7] = [0.707, 0, -0.707, 0]
-    q_target[0:3] = data.qpos[0:3]
-    q_target[3:7] = data.qpos[3:7]
-    data.qvel[:] = 0
-    return q_target
-
 # ──────────────────────────────────────
-# PD Control
+# Per-limb IK (only moves joints in that limb)
 # ──────────────────────────────────────
 
-def build_gains(model):
-    max_tau = np.zeros(model.nu)
-    kp = np.zeros(model.nu)
-    kd = np.zeros(model.nu)
-    for i in range(model.nu):
-        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)
-        frc = TORQUE_LIMITS.get(name, 25.0)
-        max_tau[i] = frc
-        kp[i] = frc * 0.3
-        kd[i] = kp[i] * 1.0
-    return kp, kd, max_tau
-
-def pd_control(model, data, q_target, kp, kd, max_tau):
-    for i in range(model.nu):
-        jnt_id = model.actuator_trnid[i][0]
-        qa = model.jnt_qposadr[jnt_id]
-        va = model.jnt_dofadr[jnt_id]
-        tau = kp[i] * (q_target[qa] - data.qpos[qa]) + kd[i] * (-data.qvel[va])
-        data.ctrl[i] = np.clip(tau, -max_tau[i], max_tau[i])
-
-# ──────────────────────────────────────
-# Inverse Kinematics
-# ──────────────────────────────────────
-
-def get_ee_positions(model, data):
-    """Get current end-effector positions from site sensors."""
-    positions = {}
-    for name in EE_SITES:
-        site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name)
-        positions[name] = data.site_xpos[site_id].copy()
-    return positions
-
-def ik_solve(model, data, q_target, ee_targets, max_iters=50, step_size=0.5, tol=0.001):
-    """
-    Jacobian-based IK: given target positions for end-effectors,
-    compute joint angles that reach them.
-
-    Args:
-        model, data: MuJoCo model/data
-        q_target: current joint target (modified in place for actuated DOFs)
-        ee_targets: dict {site_name: np.array([x,y,z])}
-        max_iters: IK iterations
-        step_size: gradient step size (smaller = more stable)
-        tol: position error tolerance
-
-    Returns:
-        q_target with updated joint angles
-    """
-    # Work on a copy of data to not disturb the simulation
-    d = mujoco.MjData(model)
-    d.qpos[:] = q_target
-    mujoco.mj_forward(model, d)
-
+def ik_solve_limb(model, data, site_name, target_pos, max_iters=100, step_size=0.5, tol=0.002):
+    """Solve IK for a single end-effector, only modifying its limb's joints."""
+    sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
+    dof_ids = LIMB_DOFS[site_name]
+    joint_names = LIMB_JOINTS[site_name]
     nv = model.nv
-    jacp = np.zeros((3, nv))  # position Jacobian
+    jacp = np.zeros((3, nv))
 
     for _ in range(max_iters):
-        mujoco.mj_forward(model, d)
-        total_err = 0.0
-
-        dq = np.zeros(nv)
-        for site_name, target_pos in ee_targets.items():
-            site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
-            current_pos = d.site_xpos[site_id]
-            err = target_pos - current_pos
-            total_err += np.linalg.norm(err)
-
-            # Compute Jacobian for this site
-            jacp[:] = 0
-            mujoco.mj_jacSite(model, d, jacp, None, site_id)
-
-            # Damped least squares: dq += J^T (J J^T + λI)^-1 err
-            lam = 0.1
-            JJT = jacp @ jacp.T + lam * np.eye(3)
-            dq += jacp.T @ np.linalg.solve(JJT, err)
-
-        if total_err < tol:
+        mujoco.mj_forward(model, data)
+        err = target_pos - data.site_xpos[sid]
+        if np.linalg.norm(err) < tol:
             break
 
-        # Apply delta, skip the 6 free-joint DOFs (keep base fixed for IK)
-        d.qpos[7:] += step_size * dq[6:]
-        # Clamp to joint limits
-        for i in range(model.njnt):
-            if model.jnt_type[i] == mujoco.mjtJoint.mjJNT_HINGE:
-                qa = model.jnt_qposadr[i]
-                lo, hi = model.jnt_range[i]
-                if lo < hi:
-                    d.qpos[qa] = np.clip(d.qpos[qa], lo, hi)
+        jacp[:] = 0
+        mujoco.mj_jacSite(model, data, jacp, None, sid)
 
-    # Copy solved joint angles back (only actuated joints, not free joint)
-    q_target[7:] = d.qpos[7:]
-    return q_target
+        # Extract only columns for this limb's DOFs
+        J = jacp[:, dof_ids]  # 3 x n_limb_dofs
+
+        # Damped least squares
+        lam = 0.01
+        JJT = J @ J.T + lam * np.eye(3)
+        dq = J.T @ np.linalg.solve(JJT, err)
+
+        # Apply to only this limb's joints
+        for i, dof in enumerate(dof_ids):
+            # dof -> qpos: for hinge joints, qposadr = dofadr + 7 - 6 = dofadr + 1
+            # Actually need to find the joint and its qposadr
+            jname = joint_names[i]
+            jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, jname)
+            qa = model.jnt_qposadr[jid]
+            data.qpos[qa] += step_size * dq[i]
+            # Clamp to joint limits
+            lo, hi = model.jnt_range[jid]
+            if lo < hi:
+                data.qpos[qa] = np.clip(data.qpos[qa], lo, hi)
 
 # ──────────────────────────────────────
-# Main
+# GUI
+# ──────────────────────────────────────
+
+class EEController:
+    def __init__(self):
+        self.offsets = {name: np.zeros(3) for name in EE_SITES}
+        self.home = None
+        self.active = {name: False for name in EE_SITES}  # which EEs have moved
+
+    def get_targets(self):
+        if self.home is None:
+            return {}
+        targets = {}
+        for name in EE_SITES:
+            off = self.offsets[name]
+            if np.any(np.abs(off) > 0.001):
+                targets[name] = self.home[name] + off
+                self.active[name] = True
+            elif self.active[name]:
+                targets[name] = self.home[name]
+                self.active[name] = False
+        return targets
+
+def start_gui(ctrl):
+    root = tk.Tk()
+    root.title("G1 IK Controller")
+    root.configure(bg="#1a1a1a")
+
+    sliders = {}
+    RANGE = 0.20
+
+    for idx, name in enumerate(EE_SITES):
+        frame = tk.LabelFrame(root, text=f" {EE_LABELS[idx]} ",
+                               font=("Arial", 11, "bold"),
+                               fg=EE_COLORS[idx], bg="#1a1a1a", padx=5, pady=3)
+        frame.pack(padx=8, pady=3, fill="x")
+
+        sliders[name] = {}
+        for axis, label in enumerate(["X", "Y", "Z"]):
+            row = tk.Frame(frame, bg="#1a1a1a")
+            row.pack(fill="x")
+            tk.Label(row, text=label, font=("Arial", 9, "bold"), fg="white",
+                     bg="#1a1a1a", width=2).pack(side="left")
+            s = tk.Scale(row, from_=-RANGE, to=RANGE, resolution=0.005,
+                         orient=tk.HORIZONTAL, length=220,
+                         bg="#2d2d2d", fg="white", troughcolor="#404040",
+                         highlightbackground="#1a1a1a", showvalue=True)
+            s.set(0.0)
+            s.pack(side="left", fill="x", expand=True)
+            sliders[name][axis] = s
+
+    def update():
+        for name in EE_SITES:
+            for axis in range(3):
+                ctrl.offsets[name][axis] = sliders[name][axis].get()
+        root.after(20, update)
+
+    def reset():
+        for name in EE_SITES:
+            for axis in range(3):
+                sliders[name][axis].set(0.0)
+
+    tk.Button(root, text="Reset All", command=reset, bg="#dc2626", fg="white",
+              font=("Arial", 10, "bold"), padx=20, pady=5).pack(pady=8)
+
+    root.after(20, update)
+    root.mainloop()
+
+# ──────────────────────────────────────
+# Main — pure kinematics, no physics
 # ──────────────────────────────────────
 
 def main():
     model, data = load_model(MODEL_PATH)
-    configure_physics(model)
+    model.opt.gravity[:] = 0  # not needed since no mj_step, but just in case
     joint_map = get_joint_map(model)
+    build_limb_dofs(model)
 
-    q_target = load_pose(model, joint_map)
-    q_target = set_belly_up(data, q_target, z=0.25)
+    # Set spider pose, belly up on ground
+    q_pose = load_pose(model, joint_map)
+    data.qpos[:] = q_pose
+    data.qpos[0:3] = [0, 0, 0.25]
+    data.qpos[3:7] = [0.707, 0, -0.707, 0]
+    data.qvel[:] = 0
+
+    # Save the fixed base pose
+    base_qpos = data.qpos[0:7].copy()
+
     mujoco.mj_forward(model, data)
 
-    kp, kd, max_tau = build_gains(model)
+    # Controller
+    ctrl = EEController()
+    ctrl.home = {}
+    for name in EE_SITES:
+        sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name)
+        ctrl.home[name] = data.site_xpos[sid].copy()
+    print("Home positions:")
+    for name, pos in ctrl.home.items():
+        print(f"  {name}: [{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}]")
 
-    # Record initial EE positions from the loaded pose as IK targets
-    ee_targets = get_ee_positions(model, data)
-    print("End-effector targets:")
-    for name, pos in ee_targets.items():
-        print(f"  {name}: {pos}")
+    # Start GUI
+    threading.Thread(target=start_gui, args=(ctrl,), daemon=True).start()
 
-    RENDER_EVERY = 10
+    print("\nReady! Move sliders to control end-effectors.")
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
-        step = 0
         while viewer.is_running():
             t = time.time()
 
-            # IK: if you update ee_targets, this recomputes joint angles
-            # (RL will modify ee_targets, IK solves, PD tracks)
-            # q_target = ik_solve(model, data, q_target, ee_targets)
+            # Always lock the base in place
+            data.qpos[0:7] = base_qpos
 
-            pd_control(model, data, q_target, kp, kd, max_tau)
-            mujoco.mj_step(model, data)
-            step += 1
+            # Solve IK per-limb for any moved end-effector
+            targets = ctrl.get_targets()
+            for site_name, target_pos in targets.items():
+                ik_solve_limb(model, data, site_name, target_pos)
 
-            if step % RENDER_EVERY == 0:
-                viewer.sync()
-                time.sleep(max(0, model.opt.timestep * RENDER_EVERY - (time.time() - t)))
+            # Kinematics only — no physics, perfectly stable
+            mujoco.mj_forward(model, data)
+            viewer.sync()
+
+            time.sleep(max(0, 0.02 - (time.time() - t)))  # ~50fps
 
 if __name__ == "__main__":
     main()
