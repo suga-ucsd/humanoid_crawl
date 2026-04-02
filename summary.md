@@ -426,38 +426,431 @@ This ensures dragging the mouse left always moves the end-effector left from the
 
 ---
 
-## 10. File Structure
+## 10. RL Attempt #1 — IK-in-the-Loop (Failed)
+
+The first RL approach followed the original architecture plan: RL outputs end-effector positions, IK solves joint angles, PD tracks them.
+
+### 10.1 Design
+
+The action space was 12D — XYZ offset for each of 4 end-effectors (±10cm from home position). The pipeline per step at 50Hz was: RL outputs 12D action → IK solves per-limb joint angles (30 iterations) → PD tracks those angles for 20 physics substeps.
+
+### 10.2 Why It Failed
+
+After 2M training steps, reward oscillated in the negatives with no improvement. Several fundamental problems combined to make this approach unworkable.
+
+**IK failure corrupts the learning signal.** The IK solver frequently fails or produces weird joint configurations near singularities or joint limits. When the RL agent outputs a reasonable EE target but IK produces a bad solution, the agent receives negative reward for something that wasn't its fault. The agent cannot distinguish "I chose a bad target" from "IK failed on a good target." This makes the reward signal extremely noisy and learning impossible.
+
+**Static home positions become meaningless.** The `ee_home` positions were recorded once at reset in world coordinates. As the robot moves under physics, those world-space targets drift relative to the body. After a few seconds, the targets point to positions the robot left behind.
+
+**12D EE space is still too large for exploration.** Random XYZ offsets for 4 end-effectors produce random flailing, not coordinated gaits. The probability of randomly discovering a useful crawling pattern (specific phase relationships between limbs, correct stride timing) is near zero.
+
+**2M steps is insufficient.** Complex locomotion tasks with high-dimensional action spaces typically require 10-50M steps even with good reward shaping.
+
+### 10.3 Lesson
+
+IK-in-the-loop adds a noisy, sometimes-failing layer between the RL agent and the physics. The agent cannot learn to control something it cannot reliably predict. Removing IK from the training loop and giving RL direct joint control eliminates this uncertainty.
+
+<!-- [IMAGE: Training curves showing flat/oscillating reward] -->
+
+---
+
+## 11. RL Attempt #2 — Direct Joint Control (Failed)
+
+Inspired by successful locomotion papers (ANYmal, Cassie), the second attempt removed IK entirely. RL directly outputs target joint angles. This is how most successful legged locomotion works.
+
+### 11.1 Design
+
+The action space was 21D — one offset per actuated joint, scaled to ±0.3 rad from the spider pose. A gait phase clock (`sin(phase)`, `cos(phase)`) was added to the observation to encourage periodic motion. The reward included forward velocity, alive bonus, orientation, contact cycling (rewarding diagonal pair alternation), pose regularization, energy penalty, and action smoothness.
+
+### 11.2 Curriculum Learning Addition
+
+After the initial version showed no learning at 5M steps, a curriculum was added with three phases. Phase 1 (0-3M steps) rewarded only stability — big alive bonus, belly-up orientation, height maintenance, pose holding. Phase 2 (3M-7M steps) gradually ramped up velocity reward while maintaining stability reward. Phase 3 (7M+ steps) used the full velocity reward.
+
+Additional changes: smaller action scale (±0.15 rad), smaller initial policy noise (`log_std_init=-1.5`), very lenient termination (only NaN or extreme height), and all reward components designed to give positive baseline reward.
+
+### 11.3 Why It Failed
+
+Even with curriculum learning and 5M+ steps, the agent failed to discover crawling motion.
+
+**The fundamental problem is the search space.** The agent must output 21 joint values every single timestep (50Hz) and somehow discover that they need to be periodic, coordinated across 4 limbs, and phase-offset in a specific pattern. This is like asking someone to independently control 21 knobs 50 times per second and produce a walking pattern. The search space is enormous — the chance of random exploration stumbling upon anything resembling coordinated locomotion is effectively zero.
+
+**The agent learned to not die, but not to move.** The curriculum successfully taught the agent to hold the spider pose (Phase 1 reward was positive). But transitioning to forward motion (Phase 2) required discovering a coordinated gait from scratch, which random exploration never achieved. The agent found a local optimum: hold still and collect stability reward.
+
+**The gait clock didn't help enough.** While the phase clock provided timing information, the agent still needed to learn which joints to oscillate, with what amplitude, and with what phase relationship to the clock. This is still a huge combinatorial search.
+
+### 11.4 Lesson
+
+Direct joint control works in the literature because those papers use either massive compute (billions of steps on GPU-accelerated simulators like Isaac Gym), sophisticated reward shaping with domain randomization, or reference motions. With SB3 on CPU, the sample efficiency is too low for a 21D action space to find coordinated periodic motion from scratch.
+
+---
+
+## 12. RL Attempt #3 — Central Pattern Generator (Failed)
+
+To reduce the search space, a CPG was introduced. The RL agent controls only gait parameters, and the CPG converts them into coordinated periodic joint trajectories.
+
+### 12.1 Design
+
+The action space was reduced to 10D: 4 per-limb amplitudes (how much each limb swings), 4 per-limb phase offsets (fine-tune the trot timing), 1 global frequency (stepping speed), and 1 stride height (how high to lift limbs). The CPG generated sinusoidal joint trajectories: `pitch = amplitude × sin(phase)` for forward/back swing, `roll = amplitude × 0.3 × cos(phase)` for lateral lift, and `knee = amplitude × 0.5 × max(0, sin(phase))` for ground clearance.
+
+Default phases encoded a trot gait (diagonal pairs in sync). The RL agent only needed to fine-tune amplitudes and timing — periodicity was guaranteed.
+
+### 12.2 Manual Testing Revealed Fundamental CPG Problems
+
+A `--mode manual` option with tkinter sliders was added to test CPG parameters without RL. This revealed that no combination of parameters produced forward motion — the robot slid in circles instead of crawling.
+
+**Problem 1: Symmetric sine waves produce zero net force.** The CPG used pure sinusoids for pitch — the limb pushes forward and backward equally, resulting in no net displacement. For crawling, the stance phase (pushing against ground) and swing phase (repositioning in air) need to be asymmetric.
+
+**Problem 2: Per-limb push directions were wrong.** The `get_push_directions` function computed outward directions from the pelvis for each limb. This meant front limbs pushed forward, back limbs pushed backward, left limbs pushed left, right limbs pushed right. These forces canceled out, producing no net motion (or circular sliding from slight asymmetries).
+
+**Problem 3: Trot gait (2 limbs up, 2 down) was unstable.** A belly-up robot with only 2 limbs on the ground is inherently unstable. The robot needs 3 limbs on the ground at all times (wave gait).
+
+### 12.3 Attempted Fixes
+
+The CPG was redesigned with distinct stance/swing phases using piecewise waveforms instead of pure sinusoids. Per-limb sign conventions were added to flip push directions for arms vs legs. The manual slider interface allowed real-time parameter tuning.
+
+Despite these fixes, the robot still slid rather than crawled. The core issue was that the CPG was designed heuristically without understanding the precise kinematics of the belly-up configuration. Getting the sign conventions, phase relationships, and joint coupling correct for all 4 limbs by hand proved extremely difficult.
+
+### 12.4 Lesson
+
+CPGs work well when the gait pattern is well-understood (e.g., quadruped walking has decades of research). For an unusual configuration like belly-up spider crawling, the correct CPG parameters are not intuitive. The manual tuning approach exposed the problem: if a human engineer can't find working parameters with live sliders, an RL agent won't either — the CPG structure itself was wrong, not just the parameters.
+
+---
+
+## 13. The Reference Motion Approach (Current)
+
+After three failed RL attempts, the approach shifted to a fundamentally different strategy: first create a working crawling motion using IK (no physics), then train RL to reproduce it under physics. This is imitation learning, specifically reference motion tracking (similar to DeepMimic).
+
+### 13.1 Why This Should Work
+
+All three previous approaches failed because the RL agent had to **discover** the crawling motion from scratch. With imitation learning, the motion is **given** — the agent only needs to learn the corrections required to execute it under real physics (gravity compensation, contact force management, balance).
+
+This is analogous to teaching someone to swim: instead of throwing them in the pool and rewarding forward motion (Options A/B/C), you show them the arm strokes and kick pattern on land first, then have them practice it in water (imitation learning). The second approach is how every swim instructor actually teaches.
+
+The technical advantages are: dense reward signal at every timestep (distance to reference pose, not just "did you move forward"), small action space (corrections are ±0.1 rad, not ±0.3 rad), the observation includes both current and target state so the agent knows exactly what to correct, and even with zero RL (pure playback), the motion approximates crawling.
+
+### 13.2 Reference Motion Generator (`g1_crawl_ref.py`)
+
+The reference generator creates crawling trajectories using pure kinematics (no physics, no gravity, base locked).
+
+**End-effector trajectories** trace D-shaped hook/digging paths. Each foot follows an elliptical trajectory: during swing, the foot lifts from the rear, arcs forward and up in a bell curve, and plants at the front. During stance, the foot stays on the ground and drags from front to rear, pushing the body forward.
+
+The D-shape was critical — earlier versions used pure sinusoids where the foot went straight up and came straight back down to the same position, producing no forward travel. The fix was switching from `sin(phase)` to `-cos(phase)` for the horizontal component, which creates the necessary offset between the lift point and the plant point.
+
+<!-- [IMAGE: D-shaped trajectory diagram — swing arc above, stance drag below] -->
+
+**Wave gait (3+1 pattern)** ensures stability. Each limb is phase-offset by 90° (π/2): left foot at 0°, left hand at 90°, right foot at 180°, right hand at 270°. The swing duty cycle is 25% — each limb is airborne for only one quarter of the cycle. With 4 limbs staggered by 25%, exactly 1 limb is in the air and 3 are on the ground at any moment.
+
+```
+Time →
+LF:  ██SWING██░░░░░░░░░░░░░░░░░░░░░░░░  (25% swing, quick scoop)
+LH:  ░░░░░░░░██SWING██░░░░░░░░░░░░░░░░
+RF:  ░░░░░░░░░░░░░░░░██SWING██░░░░░░░░
+RH:  ░░░░░░░░░░░░░░░░░░░░░░░░██SWING██
+
+Ground: 3 limbs   3 limbs   3 limbs   3 limbs  ← always stable
+```
+
+**Unified push direction** was another critical fix. All 4 limbs use the same movement direction vector. During stance, every foot drags opposite to the movement direction — this is what creates net forward force. Earlier versions computed per-limb push directions (outward from pelvis), which caused front and back limbs to cancel each other out, resulting in spinning instead of translation.
+
+```
+WRONG (per-limb outward):           CORRECT (unified direction):
+  LF→↗   RF→↘                        LF→→   RF→→
+      [body]         net = 0              [body]       net = →→→
+  LH→↙   RH→↖                        LH→→   RH→→
+```
+
+**IK solves per-limb.** For each end-effector target position, the Jacobian-based IK solver adjusts only the 5 joints in that limb's kinematic chain. This prevents cross-limb interference.
+
+**Multi-direction reference data.** The generator can save trajectories for 8 compass directions plus stationary, creating a library of references for the RL agent. The `--save-all` flag produces `g1_ref_forward.npz`, `g1_ref_backward.npz`, `g1_ref_left.npz`, etc. Each file contains timestamped joint angle trajectories, EE positions, gait phase, and movement direction.
+
+### 13.3 Reference Data Format
+
+Each `.npz` file contains:
+
+| Field | Shape | Description |
+|---|---|---|
+| `times` | [N] | Timestamps at 50Hz |
+| `joint_qpos` | [N, 21] | Actuated joint angles per frame |
+| `ee_positions` | [N, 4, 3] | End-effector XYZ positions per frame |
+| `phase` | [N] | Gait phase angle (0 to 2π) |
+| `move_dir` | [2] | Movement direction vector |
+| `speed` | scalar | Gait frequency in Hz |
+| `stride` | scalar | Stride length in meters |
+| `lift` | scalar | Foot lift height in meters |
+
+The reference loops seamlessly — the last frame connects back to the first. During RL training, the `ReferenceLibrary` class loads all reference files and provides frame-interpolated joint targets for any gait phase.
+
+<!-- [IMAGE: Reference motion visualization — robot with limb trajectories traced] -->
+
+---
+
+## 14. Imitation Learning Environment (`g1_rl_imitate.py`)
+
+The imitation learning RL environment uses a **residual policy** approach (similar to DeepMimic). The reference motion provides the base trajectory, and the RL agent learns small corrections to make it work under real physics.
+
+### 14.1 Residual Policy Architecture
+
+At each control step (50Hz):
+
+```
+reference_angles = lookup(reference_trajectory, current_phase)
+correction = RL_agent(observation) × 0.1 rad
+target_angles = reference_angles + correction
+torques = PD_controller(target_angles)
+```
+
+The agent does NOT learn the crawling motion — that comes from the reference. The agent learns the 10% that physics demands: gravity compensation, contact force management, balance recovery. The correction scale (±0.1 rad) is deliberately small to keep the motion close to the reference.
+
+### 14.2 Settling and Blending
+
+Early versions of the environment dropped the robot from z=0.25m and immediately started playing the reference. Under gravity, the robot fell while trying to crawl, producing chaos. Two mechanisms were added to fix this.
+
+**Settling phase:** During `reset()`, the robot holds the spider pose under PD control for 50 control steps (1 second) with full physics. Gravity pulls it to the ground, the PD controller holds the pose, and velocities are zeroed afterward. The robot starts the episode already resting stably on the ground.
+
+**Motion blending:** For the first 100 steps (2 seconds) of each episode, the joint targets are linearly blended from the settled pose to the full reference trajectory. This prevents the sudden onset of crawling motion from destabilizing the settled robot. The blend factor `b` goes from 0 to 1:
+
+```
+target = (1 - b) × settled_pose + b × reference_pose + RL_correction
+```
+
+The reference clock only advances once blending is complete, so the gait doesn't get ahead of the body.
+
+### 14.3 Observation Space
+
+The observation is designed so the agent knows both where it is and where it should be:
+
+| Component | Dimensions | Purpose |
+|---|---|---|
+| Pelvis quaternion | 4 | Body orientation |
+| Pelvis angular velocity | 3 | Rotational dynamics |
+| Pelvis linear velocity | 3 | Translational dynamics |
+| Joint positions | 21 | Current joint angles |
+| Joint velocities | 21 | Current joint speeds |
+| Reference joint positions | 21 | What the joints SHOULD be |
+| Joint tracking error | 21 | Difference (ref - current) |
+| EE positions (relative) | 12 | Where the feet/hands are |
+| Reference EE positions | 12 | Where they SHOULD be |
+| Gait phase clock | 2 | sin/cos of current phase |
+| Target direction | 2 | Where to crawl |
+| Base height | 1 | How high off ground |
+| **Total** | **123** | |
+
+The reference joint positions and tracking error are critical — they tell the agent exactly what needs correcting at each moment.
+
+### 14.4 Reward Function
+
+The reward combines tracking fidelity with locomotion objectives:
+
+**Joint tracking (weight 3.0):** `exp(-5 × ||q - q_ref||² / n_joints)`. Exponential form bounded between 0 (terrible tracking) and 1 (perfect match). The scaling by `n_joints` normalizes across different robot sizes. A typical well-tracked pose scores 0.7-0.9.
+
+**EE position tracking (weight 2.0):** `exp(-50 × Σ||ee - ee_ref||² / 4)`. Same exponential form but in Cartesian space. More robust than joint tracking because different joint configurations can produce the same EE position.
+
+**Forward velocity (weight 2.0):** `dot(vel_xy, target_dir)`. Positive when moving in the target direction. This is the secondary objective — the agent should crawl forward while tracking the reference.
+
+**Alive bonus (weight 0.5):** Constant +1.0 per step for existing. Ensures the baseline reward is positive so longer episodes are always better than early termination.
+
+**Orientation (weight 1.0):** `max(0, -pelvis_rot[2,2])`. Rewards keeping the belly facing up. Ranges from 0 (belly down) to 1 (belly perfectly up).
+
+**Energy penalty (weight 0.0005):** `Σ(ctrl²) / n_actuators`. Small penalty for large torques.
+
+**Action smoothness (weight 0.02):** `Σ(action - prev_action)²`. Penalizes jerky corrections.
+
+### 14.5 Reference Library
+
+The `ReferenceLibrary` class loads all `g1_ref_*.npz` files at initialization. At each episode reset, it selects the reference whose movement direction is closest (by dot product) to the current target direction. Frame lookup uses linear interpolation between recorded timesteps, and the trajectory loops seamlessly.
+
+### 14.6 Stronger PD Gains
+
+The PD gains were increased for imitation learning: `Kp = 1.0 × torque_limit` (was `0.5×`), `Kd = 0.3 × Kp`. Tracking a moving reference under gravity requires stronger control than holding a static pose. The previous gains were too weak — the robot would sag away from the reference, and the tracking reward would be perpetually low, giving the RL agent no useful gradient.
+
+### 14.7 Playback Mode
+
+The `--mode playback` command runs the reference under full physics with zero RL corrections. This serves as a diagnostic: if playback produces recognizable crawling motion (even imperfect), the RL agent only needs to learn small corrections. If playback fails completely, the reference or physics configuration needs fixing before training.
+
+---
+
+## 15. Key Lessons & Debugging (RL Phase)
+
+### 15.1 The Agent Learns to Die
+
+**Problem:** In early RL versions, the reward was net-negative for surviving. The agent discovered that dying quickly (short episode) produced less total negative reward than living longer. It learned to flip itself over on purpose.
+
+**Fix:** Always design rewards with a positive alive baseline. If the agent scores higher by dying, your reward is broken. The simplest test: a random agent should accumulate positive reward. If it doesn't, fix the reward before training.
+
+### 15.2 IK-in-the-Loop Corrupts Learning
+
+**Problem:** The IK solver sometimes fails, producing bad joint configurations. The RL agent receives negative reward for IK failures, not its own mistakes.
+
+**Fix:** Remove IK from the training loop entirely. For training, RL should control joints directly (or through a reference + corrections). IK is useful for visualization and reference generation, not for online control during training.
+
+### 15.3 The Random Agent Test
+
+**Problem:** Training for millions of steps with no improvement, unable to diagnose why.
+
+**Fix:** Always test with `--mode test` (random agent) before training. Check: (1) Are episodes surviving the full length? If not, termination is too aggressive. (2) Is the random reward positive? If not, the reward baseline is wrong. (3) What do the contacts look like? If always `[0,0,0,0]`, the limbs never touch ground.
+
+### 15.4 The Manual CPG Test
+
+**Problem:** The CPG-based RL wasn't learning, but it was unclear whether the CPG structure was wrong or just the parameters.
+
+**Fix:** Adding a `--mode manual` with live tkinter sliders instantly revealed that no parameter combination produced forward motion — the CPG structure itself was broken. Always provide a manual testing mode for any controller you plan to train with RL.
+
+### 15.5 Push Direction Cancellation
+
+**Problem:** The robot slid in circles instead of moving forward, despite all limbs moving periodically.
+
+**Fix:** All 4 limbs must push in the SAME direction (the movement direction). Per-limb outward directions cause front and back limbs to cancel each other's forces. This is counterintuitive — it feels like each limb should push "outward" — but for translation, all forces must be aligned.
+
+### 15.6 Reference Generated Without Physics ≠ Playable Under Physics
+
+**Problem:** The reference motion looked perfect in kinematics mode (no gravity, fixed base) but produced sliding chaos when played under full physics.
+
+**Fix:** Three mechanisms: (1) Settling phase — let the robot stabilize under gravity before starting the reference. (2) Gradual blending — ramp from settled pose to full reference over 2 seconds. (3) Stronger PD gains — tracking a moving reference under gravity requires higher stiffness than holding a static pose.
+
+### 15.7 Gym vs Gymnasium
+
+**Problem:** `pip install gym` installs the deprecated, unmaintained package that doesn't support NumPy 2.0. Produces walls of deprecation warnings.
+
+**Fix:** `pip uninstall gym && pip install gymnasium`. The maintained fork, required by Stable-Baselines3.
+
+### 15.8 Tensorboard Not Installed
+
+**Problem:** SB3 crashes with `ImportError: Trying to log data to tensorboard` when `tensorboard_log` is specified.
+
+**Fix:** Either `pip install tensorboard` or remove the `tensorboard_log="logs/"` line from the PPO constructor.
+
+---
+
+## 16. File Structure (Updated)
 
 ```
 project/
 ├── humanoids/
-│   ├── g1_29dof_lock_waist_rev_1_0.xml    # Robot model
+│   ├── g1_29dof_lock_waist_rev_1_0.xml    # Robot model (XML)
 │   └── meshes/                             # STL mesh files
 ├── g1_pose.txt                             # Spider pose joint values
-├── g1_viewer.py                            # Pose editor (tkinter + slider GUI)
-├── g1_crawl.py                             # Interactive IK viewer (GLFW + mouse)
-├── g1_rl.py                                # RL training pipeline
-└── models/                                 # Saved RL checkpoints
+│
+├── ── Pose Design ──
+├── g1_viewer.py                            # Pose editor (tkinter sliders + MuJoCo viewer)
+│
+├── ── Interactive IK ──
+├── g1_crawl.py                             # GLFW viewer with click-and-drag IK
+│
+├── ── Reference Motion ──
+├── g1_crawl_ref.py                         # IK crawling reference generator
+├── g1_ref_forward.npz                      # Reference: forward crawl
+├── g1_ref_backward.npz                     # Reference: backward crawl
+├── g1_ref_left.npz                         # Reference: left crawl
+├── g1_ref_right.npz                        # Reference: right crawl
+├── g1_ref_fwd_left.npz                     # Reference: diagonal
+├── g1_ref_fwd_right.npz                    # Reference: diagonal
+├── g1_ref_bwd_left.npz                     # Reference: diagonal
+├── g1_ref_bwd_right.npz                    # Reference: diagonal
+├── g1_ref_stationary.npz                   # Reference: idle pose
+│
+├── ── RL Training (Failed Attempts) ──
+├── g1_rl.py                                # Attempt 1: IK-in-the-loop (failed)
+├── g1_rl_direct.py                         # Attempt 2: direct joint control (failed)
+├── g1_rl_cpg.py                            # Attempt 3: CPG + RL (failed)
+│
+├── ── RL Training (Current) ──
+├── g1_rl_imitate.py                        # Imitation learning (reference tracking)
+│
+├── models/                                 # Saved RL checkpoints
+│   ├── best/                               # Best model from eval callback
+│   └── g1_imitate_*.zip                    # Periodic checkpoints
+└── logs/                                   # Training logs
 ```
 
 ---
 
-## 11. Dependencies
+## 17. Dependencies
 
 ```bash
 pip install mujoco gymnasium stable-baselines3 numpy
 ```
 
-- **MuJoCo** — physics simulation and rendering
+- **MuJoCo** (≥3.0) — physics simulation and rendering
 - **GLFW** — bundled with MuJoCo, used for the custom interactive viewer
-- **Gymnasium** — RL environment interface
+- **Gymnasium** — RL environment interface (NOT `gym`, which is deprecated)
 - **Stable-Baselines3** — PPO implementation for training
 - **NumPy** — array operations
+- **Tensorboard** (optional) — `pip install tensorboard` for training visualization
 
 ---
 
-## 12. Next Steps
+## 18. Command Reference
 
-The IK and PD layers are complete and tested. The next phase is RL training, where a policy network learns to output end-effector target positions that produce coordinated spider crawling locomotion. The RL agent's job is coordination, gait timing, and balance — the IK and PD handle the mechanical execution.
+### Pose Design
+```bash
+python g1_viewer.py                           # Edit spider pose with sliders
+```
+
+### Interactive IK
+```bash
+python g1_crawl.py                            # Click-and-drag end-effectors
+```
+
+### Reference Motion
+```bash
+python g1_crawl_ref.py                        # Visualize forward crawl
+python g1_crawl_ref.py --dir 0 1              # Visualize leftward crawl
+python g1_crawl_ref.py --stride 0.06 --lift 0.05 --speed 0.5
+python g1_crawl_ref.py --save                 # Save forward reference
+python g1_crawl_ref.py --save-all             # Save all 8 directions + idle
+```
+
+### Imitation Learning
+```bash
+python g1_rl_imitate.py --mode playback       # Test reference under physics
+python g1_rl_imitate.py --mode test           # Random agent diagnostic
+python g1_rl_imitate.py --mode train --steps 5000000 --n_envs 8
+python g1_rl_imitate.py --mode eval --checkpoint models/best/best_model
+python g1_rl_imitate.py --mode eval --checkpoint models/best/best_model --target 0 1
+```
+
+---
+
+## 19. Architecture Evolution
+
+The project went through four distinct architectural phases. Each failure informed the next design.
+
+```
+Attempt 1: RL → IK → PD → Physics
+  Problem: IK failures corrupt RL signal
+  Result:  No learning after 2M steps
+
+Attempt 2: RL → PD → Physics  (direct joint control)
+  Problem: 21D action space too large for random exploration
+  Result:  Agent learns to hold still, never discovers gait
+
+Attempt 3: RL → CPG → PD → Physics
+  Problem: CPG structure wrong for belly-up config
+  Result:  No parameter combo produces forward motion
+
+Attempt 4: Reference + RL corrections → PD → Physics  (current)
+  Approach: IK generates reference offline, RL learns small corrections online
+  Status:  In progress
+```
+
+The key insight from this evolution: **separate motion design from motion execution.** Design the crawling motion offline using tools you can see and control (IK, sliders, visualization). Then train RL to execute that motion under physics constraints. Don't ask RL to simultaneously discover AND execute a complex motion.
+
+<!-- [IMAGE: Architecture evolution diagram showing the four attempts] -->
+
+---
+
+## 20. What's Next
+
+The imitation learning pipeline is set up. The remaining work is:
+
+1. **Verify playback** — confirm the reference motion produces recognizable crawling under physics (`--mode playback`). If tracking scores (`j_track`) are above 0.5, the setup is correct.
+
+2. **Train the residual policy** — run imitation learning with 84 parallel environments for 5-10M steps. The agent should learn gravity compensation and balance corrections quickly since the reference provides 90% of the solution.
+
+3. **Evaluate directional control** — test with different `--target` directions to verify the agent selects and tracks the correct reference.
+
+4. **Fine-tune for real crawling** — once tracking works, gradually increase the velocity reward weight to encourage the agent to push beyond just matching the reference, producing actual forward locomotion.
+
+5. **Optional: Adversarial Motion Priors (AMP)** — if reference tracking works but the resulting motion looks unnatural, AMP uses a discriminator network to learn a style reward from the reference data, producing more natural-looking gaits.
 
 <!-- [IMAGE: Vision of the final crawling behavior] -->
