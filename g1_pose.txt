@@ -3,12 +3,10 @@ left_hip_pitch_joint -0.46
 left_hip_roll_joint 0.6
 left_hip_yaw_joint -0.16
 left_knee_joint 1.47
-left_ankle_pitch_joint 0.0
 right_hip_pitch_joint -0.6
 right_hip_roll_joint -0.52
 right_hip_yaw_joint 0.16
 right_knee_joint 1.77
-right_ankle_pitch_joint 0.0
 waist_yaw_joint 0.0
 left_shoulder_pitch_joint -2.91
 left_shoulder_roll_joint 0.84

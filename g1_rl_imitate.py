@@ -35,10 +35,8 @@ EE_SITES = ["left_foot_site", "right_foot_site", "left_hand_site", "right_hand_s
 TORQUE_LIMITS = {
     "left_hip_pitch_joint": 88, "left_hip_roll_joint": 139,
     "left_hip_yaw_joint": 88, "left_knee_joint": 139,
-    "left_ankle_pitch_joint": 50,
     "right_hip_pitch_joint": 88, "right_hip_roll_joint": 139,
     "right_hip_yaw_joint": 88, "right_knee_joint": 139,
-    "right_ankle_pitch_joint": 50,
     "waist_yaw_joint": 88,
     "left_shoulder_pitch_joint": 25, "left_shoulder_roll_joint": 25,
     "left_shoulder_yaw_joint": 25, "left_elbow_joint": 25,
@@ -77,16 +75,12 @@ def configure_physics(model):
     model.opt.iterations = 20
     model.opt.ls_iterations = 10
     model.opt.solver = 2
-    # for i in range(model.ngeom):
-    #     model.geom_solref[i] = [0.02, 1.0]
-    #     model.geom_solimp[i] = [0.9, 0.95, 0.001, 0.5, 2.0]
     for i in range(6, model.nv):
-        model.dof_damping[i] = 1.0
-    # floor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
-    # model.geom_friction[floor_id] = [1.5, 0.005, 0.001]
-    # for i in range(model.ngeom):
-    #     if i != floor_id:
-    #         model.geom_friction[i] = [1.5, 0.005, 0.001]
+        model.dof_damping[i] = 0.5
+    # Fix friction on ALL colliding geoms
+    for i in range(model.ngeom):
+        if model.geom_contype[i] > 0 or model.geom_conaffinity[i] > 0:
+            model.geom_friction[i] = [3.0, 0.5, 0.5]
 
 def build_gains(model):
     max_tau = np.zeros(model.nu)
