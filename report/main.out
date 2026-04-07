@@ -1,0 +1,39 @@
+\BOOKMARK [1][-]{section.1}{Why This Problem Is Hard}{}% 1
+\BOOKMARK [2][-]{subsection.1.1}{The Fundamental Mismatch}{section.1}% 2
+\BOOKMARK [2][-]{subsection.1.2}{What Makes This Different from Quadruped RL}{section.1}% 3
+\BOOKMARK [1][-]{section.2}{Day One Reality Check: The Robot Is on Ice}{}% 4
+\BOOKMARK [1][-]{section.3}{XML Surgery and Robot Preparation}{}% 5
+\BOOKMARK [1][-]{section.4}{Solving Standing \204 The Foundation}{}% 6
+\BOOKMARK [2][-]{subsection.4.1}{Three Physics Problems}{section.4}% 7
+\BOOKMARK [2][-]{subsection.4.2}{Standing RL}{section.4}% 8
+\BOOKMARK [1][-]{section.5}{Seven Approaches \204 A Chronicle of Informed Failure}{}% 9
+\BOOKMARK [2][-]{subsection.5.1}{Attempt 1: IK-in-the-Loop \(Failed\)}{section.5}% 10
+\BOOKMARK [2][-]{subsection.5.2}{Attempt 2: Direct 21D Joint Control \(Failed\)}{section.5}% 11
+\BOOKMARK [2][-]{subsection.5.3}{Attempt 3: CPG + RL \(Failed\)}{section.5}% 12
+\BOOKMARK [2][-]{subsection.5.4}{Attempt 4: Imitation Learning \(Failed\)}{section.5}% 13
+\BOOKMARK [2][-]{subsection.5.5}{Attempt 5: Standing RL \(Success\)}{section.5}% 14
+\BOOKMARK [2][-]{subsection.5.6}{Attempt 6: 8-DOF Sine Gait + RL \(Partial\)}{section.5}% 15
+\BOOKMARK [2][-]{subsection.5.7}{Attempt 7: Triangle-Wave CPG + RL \(Working\)}{section.5}% 16
+\BOOKMARK [1][-]{section.6}{The Two-Gain Architecture}{}% 17
+\BOOKMARK [1][-]{section.7}{Reward Engineering \204 Six Versions, Six Exploits}{}% 18
+\BOOKMARK [2][-]{subsection.7.1}{v1: Cumulative Progress}{section.7}% 19
+\BOOKMARK [2][-]{subsection.7.2}{v2: Per-Step Displacement}{section.7}% 20
+\BOOKMARK [2][-]{subsection.7.3}{v3: Require Lifting}{section.7}% 21
+\BOOKMARK [2][-]{subsection.7.4}{v4: Fairness + Lazy Penalty}{section.7}% 22
+\BOOKMARK [2][-]{subsection.7.5}{v5: Anti-Jumping + Grounded Constraint}{section.7}% 23
+\BOOKMARK [2][-]{subsection.7.6}{v6: Per-Limb Directional Consistency \(Final\)}{section.7}% 24
+\BOOKMARK [2][-]{subsection.7.7}{Complete Final Reward}{section.7}% 25
+\BOOKMARK [2][-]{subsection.7.8}{Meta-Lesson: Adversarial Reward Design}{section.7}% 26
+\BOOKMARK [1][-]{section.8}{The Final System: Triangle CPG + RL}{}% 27
+\BOOKMARK [2][-]{subsection.8.1}{Architecture}{section.8}% 28
+\BOOKMARK [2][-]{subsection.8.2}{Key Parameters \(Post-Search\)}{section.8}% 29
+\BOOKMARK [2][-]{subsection.8.3}{Observation Space \(33D\)}{section.8}% 30
+\BOOKMARK [2][-]{subsection.8.4}{Episode Structure}{section.8}% 31
+\BOOKMARK [1][-]{section.9}{Results}{}% 32
+\BOOKMARK [2][-]{subsection.9.1}{Stages of Success}{section.9}% 33
+\BOOKMARK [1][-]{section.10}{Tools Developed}{}% 34
+\BOOKMARK [1][-]{section.11}{Key Lessons}{}% 35
+\BOOKMARK [1][-]{section.12}{Future Directions}{}% 36
+\BOOKMARK [1][-]{section.13}{Conclusion}{}% 37
+\BOOKMARK [1][-]{appendix.A}{Physics Configuration}{}% 38
+\BOOKMARK [1][-]{appendix.B}{File Inventory}{}% 39

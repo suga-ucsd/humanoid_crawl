@@ -2,3 +2,7 @@
 humanoid/
 unitree_ros/
 models/
+*.npz
+*.mp4
+logs/
+

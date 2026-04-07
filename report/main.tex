@@ -1,0 +1,797 @@
+\documentclass[11pt, a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{tikz}
+\usetikzlibrary{shapes, arrows.meta, positioning, fit, calc, decorations.pathreplacing}
+\usepackage{fancyhdr}
+\usepackage{tcolorbox}
+\usepackage{multicol}
+\usepackage{titlesec}
+\usepackage{tabularx}
+\usepackage{svg}
+
+\tcbuselibrary{skins, breakable}
+
+\definecolor{codeblue}{RGB}{30, 100, 200}
+\definecolor{codegray}{RGB}{100, 100, 100}
+\definecolor{codegreen}{RGB}{34, 139, 34}
+\definecolor{lightgray}{RGB}{245, 245, 245}
+\definecolor{successgreen}{RGB}{22, 163, 74}
+\definecolor{failred}{RGB}{220, 38, 38}
+\definecolor{warnbrown}{RGB}{180, 120, 30}
+\definecolor{deepblue}{RGB}{20, 60, 120}
+\definecolor{accentpurple}{RGB}{120, 60, 180}
+
+\lstset{
+  backgroundcolor=\color{lightgray},
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{codeblue}\bfseries,
+  commentstyle=\color{codegray}\itshape,
+  stringstyle=\color{codegreen},
+  breaklines=true, frame=single,
+  rulecolor=\color{codegray!30},
+  numbers=left, numberstyle=\tiny\color{codegray},
+  tabsize=4, xleftmargin=1.5em,
+}
+
+\newtcolorbox{insightbox}[1][]{colback=blue!4, colframe=deepblue, fonttitle=\bfseries\sffamily, title={$\triangleright$ Key Insight}, left=4pt, right=4pt, top=3pt, bottom=3pt, #1}
+\newtcolorbox{failbox}[1][]{colback=red!4, colframe=failred, fonttitle=\bfseries\sffamily, title={$\times$ What Failed}, left=4pt, right=4pt, top=3pt, bottom=3pt, #1}
+\newtcolorbox{fixbox}[1][]{colback=green!4, colframe=successgreen, fonttitle=\bfseries\sffamily, title={$\checkmark$ What Worked}, left=4pt, right=4pt, top=3pt, bottom=3pt, #1}
+\newtcolorbox{decisionbox}[1][]{colback=purple!4, colframe=accentpurple, fonttitle=\bfseries\sffamily, title={$\diamond$ Decision Point}, left=4pt, right=4pt, top=3pt, bottom=3pt, #1}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textit{Spider Locomotion on a Humanoid --- Lucky Robots}}
+\fancyhead[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\titleformat{\section}{\Large\bfseries\sffamily\color{deepblue}}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries\sffamily\color{deepblue!80}}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\sffamily\color{deepblue!60}}{\thesubsubsection}{1em}{}
+
+\begin{document}
+
+% ── Title Page ────────────────────────────────────────────────────
+\begin{titlepage}
+\centering
+\vspace*{2cm}
+{\Huge\bfseries\sffamily\color{deepblue} Making a Humanoid\\[0.3cm] Crawl Like a Spider}\\[1cm]
+{\Large\color{deepblue!70} Reinforcement Learning for Inverted Quadruped Locomotion\\on the Unitree G1 in MuJoCo}\\[1.5cm]
+{\large Seven Iterations, Six Reward Rewrites, and the\\Triangle-Wave CPG That Finally Made It Move}\\[2.5cm]
+
+\fbox{\parbox{0.75\textwidth}{\centering\vspace{2.5cm}
+\textit{[IMAGE: The G1 robot upright (left) vs.\ belly-up spider pose (right).]}
+\vspace{2.5cm}}}
+
+\vfill
+{\large Lucky Robots Challenge Submission}\\[0.2cm]
+{\large Subhadeep Chatterjee}\\[0.2cm]
+{\large\today}
+\end{titlepage}
+
+\begin{abstract}
+\noindent This report documents the complete development of a system that teaches a Unitree G1 humanoid robot to crawl like a spider---belly-up, all four limbs acting as legs. The project iterated through seven major approaches: IK-in-the-RL-loop, direct 21-joint control, central pattern generators with wrong signs, imitation learning from reference trajectories, static standing (the first success), sine-wave CPG with RL, and finally \textbf{triangle-wave CPG with RL corrections}---the approach that produced real forward locomotion.
+
+The reward function went through six revisions, each closing an exploit the RL agent discovered: free cumulative progress, micro-jerk sliding, legs-only crawling, dancing in place, \textbf{jumping for displacement}, and \textbf{asymmetric limb coordination} where one hand went forward while three limbs pushed backward. Each failure is documented with the reasoning that led to the next design.
+
+The final system uses an 8-DOF triangle-wave gait generator (2 joints per limb) with fast-swing/slow-stance asymmetry. RL adds small corrections and the robot produces sustained forward crawling with all four limbs cycling through swing and stance phases.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\begin{figure}[p]
+    \centering
+    \includesvg[width=\paperwidth,height=\paperheight,keepaspectratio]{project_flowchart_concept_to_crawling.svg}
+\end{figure}
+
+% %═══════════════════════════════════════════════════════════════════
+% % FULL-PAGE FLOWCHART — Two-column: Days | Attempts
+% %═══════════════════════════════════════════════════════════════════
+% \thispagestyle{empty}
+% \begin{figure}[p]
+% \centering
+% \begin{tikzpicture}[
+%   every node/.style={font=\sffamily\small},
+%   % Day labels (left column)
+%   day/.style={rectangle, rounded corners=4pt, draw=deepblue, fill=deepblue!15,
+%               text width=2.0cm, minimum height=0.85cm, align=center,
+%               font=\sffamily\small\bfseries\color{deepblue}, line width=0.8pt},
+%   % Attempt boxes (right column)
+%   fail/.style={rectangle, rounded corners=3pt, draw=failred, fill=failred!6,
+%                text width=10.5cm, minimum height=0.75cm, align=left, line width=0.7pt},
+%   win/.style={rectangle, rounded corners=3pt, draw=successgreen, fill=successgreen!6,
+%               text width=10.5cm, minimum height=0.75cm, align=left, line width=0.7pt},
+%   partial/.style={rectangle, rounded corners=3pt, draw=warnbrown, fill=warnbrown!6,
+%                   text width=10.5cm, minimum height=0.75cm, align=left, line width=0.7pt},
+%   disco/.style={rectangle, rounded corners=3pt, draw=accentpurple, fill=accentpurple!5,
+%                 text width=10.5cm, minimum height=0.65cm, align=left,
+%                 font=\sffamily\footnotesize\itshape\color{accentpurple!80!black}, line width=0.6pt},
+%   result/.style={rectangle, rounded corners=5pt, draw=successgreen, fill=successgreen!10,
+%                  text width=10.5cm, minimum height=0.8cm, align=center,
+%                  font=\sffamily\bfseries, line width=1.2pt},
+%   % Arrows
+%   arr/.style={-{Stealth[length=4pt]}, thick, codegray!70},
+%   link/.style={-{Stealth[length=3pt]}, densely dashed, accentpurple, thin},
+% ]
+%
+% % ── TITLE ──
+% \node[font=\Large\bfseries\sffamily\color{deepblue}, anchor=north] (title)
+%   at (4.5, 0) {Project Flowchart: From Concept to Crawling};
+%
+% % ── Vertical positions ──
+% \def\ystart{-1.0}
+% \def\ystep{-1.55}
+% \def\xcol{-2.2}   % day column center
+% \def\xright{5.0}  % attempt column center
+%
+% % ── DAY 1–2 ──
+% \node[day] (d1) at (\xcol, \ystart) {Day 1--2};
+% \node[fail, anchor=west] (a1) at (0.0, \ystart)
+%   {\textbf{Attempt 1: IK-in-the-Loop (12D)} --- IK failures corrupt RL $\to$ agent outputs zeros};
+% \draw[arr] (d1.east) -- (a1.west);
+%
+% \node[disco, anchor=west] (t1) at (0.0, \ystart + \ystep*0.4)
+%   {IK is fallible $\to$ remove it. Let RL control joints directly.};
+% \draw[link] (a1.south west) ++(0.3,0) -- (t1.north west) ++(0.3,0);
+%
+% % ── DAY 2–3 ──
+% \node[day] (d2) at (\xcol, \ystart + \ystep) {Day 2--3};
+% \node[fail, anchor=west] (a2) at (0.0, \ystart + \ystep)
+%   {\textbf{Attempt 2: Direct Joint Control (21D)} --- 21D too large $\to$ agent holds still / dies};
+% \draw[arr] (d2.east) -- (a2.west);
+%
+% \node[disco, anchor=west] (t2) at (0.0, \ystart + \ystep*1.4)
+%   {21D = needle in haystack. Provide rhythmic CPG structure. Reduce DOF.};
+% \draw[link] (a2.south west) ++(0.3,0) -- (t2.north west) ++(0.3,0);
+%
+% % ── DAY 3 ──
+% \node[day] (d3) at (\xcol, \ystart + \ystep*2) {Day 3};
+% \node[fail, anchor=west] (a3) at (0.0, \ystart + \ystep*2)
+%   {\textbf{Attempt 3: CPG + RL} --- Signs wrong for belly-up $\to$ robot spins in circles};
+% \draw[arr] (d3.east) -- (a3.west);
+%
+% \node[disco, anchor=west] (t3) at (0.0, \ystart + \ystep*2.4)
+%   {Don't guess signs. Also: friction is broken (ice). Pivot to reference tracking.};
+% \draw[link] (a3.south west) ++(0.3,0) -- (t3.north west) ++(0.3,0);
+%
+% % ── DAY 3–4 ──
+% \node[day] (d4) at (\xcol, \ystart + \ystep*3) {Day 3--4};
+% \node[fail, anchor=west] (a4) at (0.0, \ystart + \ystep*3)
+%   {\textbf{Attempt 4: Imitation Learning} --- Zero-gravity refs $\neq$ physics. Dances in place.};
+% \draw[arr] (d4.east) -- (a4.west);
+%
+% \node[disco, anchor=west] (t4) at (0.0, \ystart + \ystep*3.4)
+%   {Can't crawl before standing. Fix friction. Solve standing first.};
+% \draw[link] (a4.south west) ++(0.3,0) -- (t4.north west) ++(0.3,0);
+%
+% % ── DAY 4: FRICTION DISCOVERY (special) ──
+% \node[rectangle, rounded corners=4pt, draw=failred!80, fill=failred!10,
+%       text width=13.2cm, minimum height=0.65cm, align=center,
+%       font=\sffamily\small\bfseries, line width=1pt, anchor=west]
+%   (friction) at (-2.7, \ystart + \ystep*4.0)
+%   {\textcolor{failred}{FRICTION DISCOVERY:} geom\_friction $[1.0, 0.005] \to [3.0, 0.5]$ --- drift: meters $\to$ 2.4\,mm. All prior work was on ice.};
+%
+% % ── DAY 4–5 ──
+% \node[day] (d5) at (\xcol, \ystart + \ystep*5) {Day 4--5};
+% \node[win, anchor=west] (a5) at (0.0, \ystart + \ystep*5)
+%   {\textbf{Attempt 5: Standing RL} \checkmark\ --- Gravity settle + spawn height + PD targets. Converged 2M steps.};
+% \draw[arr] (d5.east) -- (a5.west);
+%
+% \node[disco, anchor=west] (t5) at (0.0, \ystart + \ystep*5.4)
+%   {Foundation works. Revisit CPG with fixed physics, automated signs, 8-DOF.};
+% \draw[link] (a5.south west) ++(0.3,0) -- (t5.north west) ++(0.3,0);
+%
+% % ── DAY 5 ──
+% \node[day] (d6) at (\xcol, \ystart + \ystep*6) {Day 5};
+% \node[partial, anchor=west] (a6) at (0.0, \ystart + \ystep*6)
+%   {\textbf{Attempt 6: Sine CPG + RL (8D)} --- Stand gains kill motion. Sine too smooth.};
+% \draw[arr] (d6.east) -- (a6.west);
+%
+% \node[disco, anchor=west] (t6) at (0.0, \ystart + \ystep*6.4)
+%   {Two-gain architecture discovered. Replace sine $\to$ triangle. Increase freq 0.5 $\to$ 1.5\,Hz.};
+% \draw[link] (a6.south west) ++(0.3,0) -- (t6.north west) ++(0.3,0);
+%
+% % ── DAY 6 ──
+% \node[day] (d7) at (\xcol, \ystart + \ystep*7) {Day 6};
+% \node[win, anchor=west] (a7) at (0.0, \ystart + \ystep*7)
+%   {\textbf{Attempt 7: Triangle CPG + RL} \checkmark\ --- Fast swing / slow stance. 6 reward revisions.};
+% \draw[arr] (d7.east) -- (a7.west);
+%
+% % ── REWARD CHAIN ──
+% \node[rectangle, rounded corners=3pt, draw=accentpurple, fill=accentpurple!5,
+%       text width=13.2cm, minimum height=0.8cm, align=center,
+%       font=\sffamily\footnotesize, line width=0.7pt, anchor=west]
+%   (rew) at (-2.7, \ystart + \ystep*7.8)
+%   {\textbf{Reward:} v1\,cumulative $\xrightarrow{\text{stop}}$
+%    v2\,per-step $\xrightarrow{\text{jerk}}$
+%    v3\,lifting $\xrightarrow{\text{legs only}}$
+%    v4\,fairness $\xrightarrow{\text{jump}}$
+%    v5\,anti-jump $\xrightarrow{\text{asymmetric}}$
+%    v6\,directional \checkmark};
+%
+% % ── RESULT ──
+% \node[result, anchor=west] (res) at (-2.7, \ystart + \ystep*8.5)
+%   {RESULT: Sustained forward crawling --- all 4 limbs cycling --- no jumping --- body elevated};
+%
+% % ── Vertical timeline line ──
+% \draw[deepblue!30, line width=2pt]
+%   (\xcol, \ystart + 0.5) -- (\xcol, \ystart + \ystep*7 - 0.5);
+%
+% % ── Vertical flow arrows between attempts ──
+% \foreach \i/\j in {1/2, 2/3, 3/4, 5/6, 6/7} {
+%   \pgfmathsetmacro{\yy}{\ystart + \ystep*\i - 0.15}
+%   \pgfmathsetmacro{\yyy}{\ystart + \ystep*\j + 0.15}
+% }
+%
+% \end{tikzpicture}
+% \caption{Development timeline. \textcolor{deepblue}{\textbf{Left:}} days. \textcolor{failred}{\textbf{Red:}} failed attempts. \textcolor{successgreen}{\textbf{Green:}} successes. \textcolor{accentpurple}{\textbf{Purple:}} reasoning that motivated each transition. The horizontal friction bar marks the pivotal discovery that invalidated all prior work.}
+% \label{fig:flowchart}
+% \end{figure}
+%
+\newpage
+
+%═══════════════════════════════════════════════════════════════════
+\section{Why This Problem Is Hard}
+%═══════════════════════════════════════════════════════════════════
+
+\subsection{The Fundamental Mismatch}
+
+The Unitree G1 is a bipedal humanoid. Its kinematics, actuator sizing, weight distribution, and joint ranges are optimized for upright walking. Asking it to crawl belly-up is asking it to do something its body was never designed for.
+
+Key mismatches:
+\begin{enumerate}[nosep]
+\item \textbf{Asymmetric actuators.} Legs: 88--139 Nm. Arms: 25 Nm (raised to 60 Nm in software). In spider mode, all four limbs must support the body equally---but two are drastically underpowered.
+\item \textbf{Insufficient arm reach.} Shoulder joints weren't designed to reach behind the body and push against the ground. We pushed shoulder\_pitch to $-2.80$ rad (near the $-3.09$ limit) just to get hands on the floor.
+\item \textbf{No contact geometry.} The robot has foot soles for bipedal walking, not hand-ground or inverted-foot-ground contact surfaces. We added box geoms at all four EE sites.
+\item \textbf{29 DOF.} Too many for brute-force RL exploration, too structured for generic optimization. A real spider has 48 joints across 8 legs with identical morphology.
+\end{enumerate}
+
+\begin{decisionbox}
+\textbf{First decomposition:} What's the minimal viable version?
+
+We identified two sub-problems: (1)~Can the robot hold the spider pose statically under gravity? (2)~Can it then move forward? This decomposition---\textit{stand, then crawl}---shaped the entire project. We refused to attempt crawling until standing was solved.
+\end{decisionbox}
+
+\subsection{What Makes This Different from Quadruped RL}
+
+Standard quadruped RL benefits from symmetric morphology (all 4 legs identical), purpose-built joints, established baselines, and powerful actuators on every limb. Our problem has none of these. The legs and arms have different kinematics, different torque limits, different mass distributions, and different reach envelopes. No baselines exist for belly-up humanoid crawling.
+
+\fbox{\parbox{0.85\textwidth}{\centering\vspace{2cm}
+\textit{[IMAGE: Spider/lizard crawling reference showing the wave gait pattern---\\which legs are in swing vs.\ stance at each phase (0°, 90°, 180°, 270°).]}
+\vspace{2cm}}}
+
+%═══════════════════════════════════════════════════════════════════
+\section{Day One Reality Check: The Robot Is on Ice}
+\label{sec:sliding}
+%═══════════════════════════════════════════════════════════════════
+
+Before any locomotion work could begin, we hit a show-stopping problem. A diagnostic script inspected every geom:
+
+\begin{failbox}
+All mesh geoms had MuJoCo's default friction: $[1.0,\ 0.005,\ 0.0001]$. MuJoCo computes contact friction as the geometric mean of the two surfaces. Even with a high-friction floor, $\sqrt{0.5 \times 0.005} = 0.05$ for torsional friction. \textbf{The robot was on ice.}
+
+This was discovered on day 4. Three days of work---IK, CPG, imitation learning---were built on a broken foundation.
+\end{failbox}
+
+\begin{fixbox}
+One line fixed every subsequent experiment:
+\begin{lstlisting}[language=Python]
+for i in range(model.ngeom):
+    if model.geom_contype[i] > 0 or model.geom_conaffinity[i] > 0:
+        model.geom_friction[i] = [3.0, 0.5, 0.5]
+\end{lstlisting}
+Drift: meters $\rightarrow$ 2.4 millimeters.
+\end{fixbox}
+
+\begin{insightbox}
+\textbf{Lesson:} Always validate the physics before building control on top of it. A 10-minute diagnostic would have saved 3 days.
+\end{insightbox}
+
+%═══════════════════════════════════════════════════════════════════
+\section{XML Surgery and Robot Preparation}
+%═══════════════════════════════════════════════════════════════════
+
+\begin{enumerate}[nosep]
+\item \textbf{Ankle joints removed.} Tiny links (0.074 kg) vibrated at high frequency. Commenting them out from XML eliminated the instability source.
+\item \textbf{Contact geoms added.} Four box geoms at EE sites with \texttt{friction="3 0.5 0.5"}, \texttt{condim="6"} for full friction cone.
+\item \textbf{Arm torques boosted.} 25 $\rightarrow$ 60 Nm for shoulder/elbow. Physically unrealistic but necessary---the real G1's arms can't support body weight in this configuration.
+\item \textbf{Belly-up quaternion.} $[0.707, 0, -0.707, 0]$ ($-90°$ around Y). Early use of $[0.707, 0.707, 0, 0]$ (rotation around X) placed the robot on its side, causing it to ``vanish'' due to nonsensical spawn height computation.
+\end{enumerate}
+
+%═══════════════════════════════════════════════════════════════════
+\section{Solving Standing --- The Foundation}
+%═══════════════════════════════════════════════════════════════════
+
+\subsection{Three Physics Problems}
+
+\textbf{Problem 1: Impact forces.} Dropping the robot from any height destabilized the PD. \textbf{Solution:} \texttt{gentle\_gravity\_settle()}---ramp gravity from 0\% to 100\% over 2 seconds with PD already active.
+
+\textbf{Problem 2: Wrong spawn height.} \textbf{Solution:} \texttt{find\_spawn\_height()}---compute exact height where lowest EE is 3 cm above ground. Zero drop.
+
+\textbf{Problem 3: Wrong PD targets.} Zero-gravity pose $\neq$ full-gravity equilibrium. Tracking the file pose under gravity creates constant error $\rightarrow$ lateral forces $\rightarrow$ sliding. \textbf{Solution:} After settling, record the \textit{actual} joint positions as PD targets.
+
+\subsection{Standing RL}
+
+With physics solved, standing RL converged in $\sim$2M steps. The robot holds the spider pose stably with body elevated.
+
+\fbox{\parbox{0.7\textwidth}{\centering\vspace{2cm}
+\textit{[IMAGE: MuJoCo screenshot of stable spider stand---belly up, all 4 EEs on ground, torso elevated.]}
+\vspace{2cm}}}
+
+%═══════════════════════════════════════════════════════════════════
+\section{Seven Approaches --- A Chronicle of Informed Failure}
+\label{sec:approaches}
+%═══════════════════════════════════════════════════════════════════
+
+\subsection{Attempt 1: IK-in-the-Loop (Failed)}
+
+\textbf{Reasoning:} RL in Cartesian space (12D EE positions) should be easier than joint space. IK handles the geometry.
+
+\begin{failbox}
+IK occasionally failed (singular Jacobians, joint limits). The RL agent couldn't distinguish its own mistakes from IK failures. After 2M steps, the agent learned to output zero deltas---the only action guaranteed not to trigger an IK failure. The learning signal was corrupted by the solver.
+\end{failbox}
+
+\noindent\textcolor{accentpurple}{\textbf{$\rightarrow$ Why this led to Attempt 2:}} The IK solver was an unreliable middleman. Every IK failure injected noise into the reward signal that RL couldn't learn from. The obvious fix: \textit{remove IK entirely} and let RL control joints directly. If the agent outputs joint angles, there is no solver to fail---every action is valid.
+
+\subsection{Attempt 2: Direct 21D Joint Control (Failed)}
+
+\textbf{Reasoning:} Remove the IK middleman. RL directly outputs all joint angles. Every action is valid---no solver failures.
+
+\begin{failbox}
+21D continuous action space. To produce a coordinated gait, the policy must simultaneously discover which joints, by how much, at what frequency, with what phase offsets. PPO found nothing. The agent converged on holding still---the action that minimized negative reward. It literally learned to die faster because shorter episodes accumulated less negative reward.
+\end{failbox}
+
+\textbf{Fix for ``learning to die'':} Added a positive alive baseline so that surviving was always better than dying. This is a general principle: \textit{if the agent scores higher by dying, your reward is broken.}
+
+\noindent\textcolor{accentpurple}{\textbf{$\rightarrow$ Why this led to Attempt 3:}} The problem wasn't RL or the reward---it was the action space. Asking PPO to discover a periodic, coordinated, multi-limb gait from scratch in 21 continuous dimensions is like searching for a needle in a haystack. The solution: \textit{provide the rhythmic structure} using a Central Pattern Generator (CPG) so RL only needs to modulate a few parameters, not invent the entire gait.
+
+\subsection{Attempt 3: CPG + RL (Failed)}
+
+\textbf{Reasoning:} CPGs produce rhythmic motion inherently. RL only modulates frequency, amplitude, coupling---a much smaller search space than raw joint control.
+
+\begin{failbox}
+The CPG sign conventions were wrong for the belly-up orientation. Joint axes invert when the robot is flipped. We guessed the signs. The guesses were wrong. Limbs pushed against each other. The robot spun in circles.
+\end{failbox}
+
+\textbf{Lesson:} With $2^8 = 256$ possible sign combinations, manual guessing is futile. This directly motivated the automated \texttt{--mode search} in the final system.
+
+\noindent\textcolor{accentpurple}{\textbf{$\rightarrow$ Why this led to Attempt 4:}} The CPG approach was sound in principle but sabotaged by wrong signs \textit{and} by the friction problem (discovered during this phase). Rather than debug CPG signs while fighting ice-like friction, we pivoted to imitation learning---let an IK-generated reference trajectory define the motion, and train RL to track it. This bypasses the sign problem entirely because the reference already encodes correct joint directions.
+
+\subsection{Attempt 4: Imitation Learning (Failed)}
+
+\textbf{Reasoning:} Generate reference crawling trajectories offline with IK (where failures can be detected and discarded). RL adds small corrections ($\pm 0.1$ rad residual policy). The reference provides 90\% of the motion; RL handles balance.
+
+\begin{failbox}
+Two failures:
+\begin{enumerate}[nosep]
+\item References were generated in zero gravity but executed under full gravity. The targets were physically inconsistent---the equilibrium positions differ.
+\item The robot discovered it could collect positive reward by dancing in place---oscillating joints (high tracking score) while sliding forward via momentum (small velocity reward). The reward function could be satisfied without walking.
+\end{enumerate}
+\end{failbox}
+
+\noindent\textcolor{accentpurple}{\textbf{$\rightarrow$ Why this led to Attempt 5:}} Two realizations: (1) We were trying to crawl before we could stand. If PD control can't even hold a static pose under gravity, it certainly can't hold a dynamic gait. (2) The friction was fundamentally broken (the ``ice'' discovery happened here). We needed to \textit{go back to basics}: fix the physics, solve standing first, and only then attempt locomotion. Standing became the gating milestone.
+
+\subsection{Attempt 5: Standing RL (\textcolor{successgreen}{Success})}
+
+Documented in Section 4. Gentle gravity settle + spawn height + friction fix + gravity-adjusted PD targets. Converged in $\sim$2M steps. The foundation that made everything else possible.
+
+\noindent\textcolor{accentpurple}{\textbf{$\rightarrow$ Why this led to Attempt 6:}} Standing worked. The physics was now trustworthy: correct friction, proper contacts, stable PD. Time to add motion. The CPG approach (Attempt 3) was the right idea---just sabotaged by bad physics and wrong signs. Now we could revisit it with: (a) fixed friction, (b) a working stand as the starting pose, (c) an automated sign search instead of guessing, and (d) a reduced 8-DOF action space (the 21D lesson from Attempt 2).
+
+\subsection{Attempt 6: 8-DOF Sine Gait + RL (Partial)}
+
+\textbf{Reasoning:} Reduce to 8 DOF (pitch + bend per limb). Built-in sine wave gait---no reference files, no IK, no solver. Automated sign search (\texttt{--mode search}) across 324 combinations.
+
+\begin{failbox}
+Three problems:
+\begin{enumerate}[nosep]
+\item Stand PD gains ($K_p = 3\times$, damping $= 3.0$) killed all motion---the sine wave couldn't overcome the overdamped PD.
+\item Sine waves have slow acceleration at extremes---the limbs decelerated exactly when they needed maximum push.
+\item Multiple reward exploits (documented in Section 7).
+\end{enumerate}
+\end{failbox}
+
+\begin{fixbox}
+The \textbf{two-gain architecture} was discovered here: stiff gains for settling ($K_p = 3\times$, $d = 3.0$), soft gains for crawling ($K_p = 1\times$, $d = 0.5$). This was the breakthrough connecting standing to crawling.
+\end{fixbox}
+
+\noindent\textcolor{accentpurple}{\textbf{$\rightarrow$ Why this led to Attempt 7:}} The architecture was right---8 DOF CPG + RL with automated signs. But two specific problems remained: (1) the sine waveform wasted energy decelerating at extremes (limbs slowed down exactly when they should push hardest), and (2) the gait frequency was too low (0.5 Hz = 2 seconds per cycle, too slow for momentum). The fix was mechanical, not algorithmic: replace sine with a triangle/piecewise waveform that spends 20\% of the cycle in fast swing and 80\% in slow stance, and increase frequency to 1.5--2.0 Hz.
+
+\subsection{Attempt 7: Triangle-Wave CPG + RL (\textcolor{successgreen}{Working})}
+
+\begin{decisionbox}
+\textbf{Why triangle over sine?} Sine waves have smooth acceleration everywhere---gentle at the peaks (where the limb reverses direction) and gentle at zero-crossing (where the limb should push hardest). For crawling, we need the opposite: \textit{fast swing} (snappy limb repositioning) and \textit{slow stance} (sustained pushing force). A triangle/piecewise waveform achieves this by spending only 20\% of the cycle in swing and 80\% in stance, with linear (constant-velocity) segments instead of sinusoidal ones.
+\end{decisionbox}
+
+The triangle gait generator:
+
+\begin{lstlisting}[language=Python, caption={Piecewise triangle gait---fast swing, slow stance.}]
+def generate_triangle_targets(home_qpos, joint_map, phase, params):
+    swing_ratio = params.get("swing_ratio", 0.2)  # 20% swing
+    for i, limb_name in enumerate(LIMB_NAMES):
+        t = ((phase + PHASE_OFFSETS[i]) % (2*np.pi)) / (2*np.pi)
+        if t < swing_ratio:
+            # SWING: fast linear ramp up then down
+            s = t / swing_ratio
+            curve = 1.0 - abs(2*s - 1)  # triangle peak at 50% of swing
+            pitch_offset = pitch_amp * pitch_signs[i] * curve
+            bend_offset  = bend_amp  * bend_signs[i]  * curve
+        else:
+            # STANCE: slow linear push
+            s = (t - swing_ratio) / (1.0 - swing_ratio)
+            pitch_offset = -pitch_amp * pitch_signs[i] * 0.6 * (1-s)
+            bend_offset  = 0.0
+\end{lstlisting}
+
+Combined with higher gait frequency ($1.5$--$2.0$ Hz vs.\ the original $0.5$ Hz), this produced 3--4$\times$ faster stepping and visually recognizable crawling for the first time.
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{clcl}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Result} & \textbf{Critical Lesson} \\
+\midrule
+1 & IK-in-the-loop (12D) & \textcolor{failred}{\textbf{Failed}} & Don't put fallible solvers in RL loop \\
+2 & Direct joint control (21D) & \textcolor{failred}{\textbf{Failed}} & Action space too large; agent learned to die \\
+3 & CPG + RL (wrong signs) & \textcolor{failred}{\textbf{Failed}} & Automate sign search, don't guess \\
+4 & Imitation learning & \textcolor{failred}{\textbf{Failed}} & Zero-gravity refs don't transfer; reward exploits \\
+5 & Standing RL & \textcolor{successgreen}{\textbf{Success}} & Physics first, RL second \\
+6 & 8-DOF sine + RL & \textcolor{warnbrown}{\textbf{Partial}} & Stand gains kill motion; sine too smooth \\
+7 & Triangle CPG + RL & \textcolor{successgreen}{\textbf{Working}} & Fast swing + slow stance + all lessons applied \\
+\bottomrule
+\end{tabular}
+\caption{All seven approaches, chronologically.}
+\end{table}
+
+%═══════════════════════════════════════════════════════════════════
+\section{The Two-Gain Architecture}
+%═══════════════════════════════════════════════════════════════════
+
+This discovery deserves its own section. The stand controller used $K_p = 3 \times \tau_{\max}$, passive damping $d = 3.0$---tuned for zero motion. When the gait generator applied offsets, the PD snapped joints back faster than the gait could move them. The robot appeared frozen.
+
+Reducing gains to $K_p = 1\times$, $d = 0.5$ allowed motion but made the gravity settle phase collapse. The robot fell before the gait started.
+
+\begin{fixbox}
+\textbf{Switch gains between phases:}
+\begin{itemize}[nosep]
+\item \textbf{Settle:} $K_p = 3\times$, $K_d = 0.3 \times K_p$, $d = 3.0$ (rigid pose, gravity ramps up).
+\item \textbf{Crawl:} $K_p = 1\times$, $K_d = 0.1 \times K_p$, $d = 0.5$ (gait can move joints).
+\end{itemize}
+\end{fixbox}
+
+%═══════════════════════════════════════════════════════════════════
+\section{Reward Engineering --- Six Versions, Six Exploits}
+\label{sec:reward}
+%═══════════════════════════════════════════════════════════════════
+
+\subsection{v1: Cumulative Progress}
+$r = 5v_x + 3(x_t - x_0) + \text{stability}$
+
+\begin{failbox}
+$(x_t - x_0)$ grows forever. Move once, collect free reward every step. Agent moved 5 cm at step 100, then held still. Reward at step 1500: $>$2000. Actual crawling: zero.
+\end{failbox}
+
+\subsection{v2: Per-Step Displacement}
+$r = 200 \cdot \max(0,\ x_t - x_{t-1})$
+
+\begin{failbox}
+Agent jerked back-and-forth, all 4 feet planted. Micro-positive displacements from momentum. Sliding, not walking.
+\end{failbox}
+
+\subsection{v3: Require Lifting}
+Added: lifting bonus (+2), all-feet-down penalty ($-3$), jerk penalty.
+
+\begin{fixbox}
+Legs started crawling! Visible swing/stance cycling.
+\end{fixbox}
+\begin{failbox}
+Only legs worked. Arms stayed planted. Reward said ``lift \textit{a} limb,'' not ``lift \textit{all} limbs in turn.''
+\end{failbox}
+
+\subsection{v4: Fairness + Lazy Penalty}
+Added: per-limb lift tracking, fairness reward ($+2 \times n_{\text{active}}/4$), lazy penalty ($-0.5$ per limb that never lifts after step 200).
+
+\begin{fixbox}
+Arms began participating. Lift counts increased for all 4 limbs.
+\end{fixbox}
+\begin{failbox}
+\textbf{New exploit: jumping.} The agent discovered that jumping forward produced massive displacement reward ($200 \times \Delta x$). It launched itself off the ground, landed a few cm forward, and repeated. No crawling---pure hopping. The displacement reward was too dominant and had no constraint on \textit{how} displacement was achieved.
+\end{failbox}
+
+\subsection{v5: Anti-Jumping + Grounded Constraint}
+
+Three fixes targeting the hopping exploit:
+\begin{itemize}[nosep]
+\item \textbf{Vertical velocity penalty:} $-5.0 \cdot |v_z|$. Jumping requires vertical velocity; crawling doesn't.
+\item \textbf{Airborne penalty:} $-3.0$ if $n_{\text{contacts}} \leq 1$ (fully airborne = penalized hard).
+\item \textbf{Height variation penalty:} $-2.0 \cdot (h - h_{\text{settled}})^2$. Any deviation from settled height is penalized.
+\item Displacement weight reduced: $200 \rightarrow 50$.
+\end{itemize}
+
+\begin{fixbox}
+Jumping eliminated. Robot stayed grounded.
+\end{fixbox}
+\begin{failbox}
+\textbf{New exploit: asymmetric limb coordination.} The left hand pushed forward while the other three limbs pushed backward. Net displacement was small but positive. The agent satisfied ``all limbs must lift'' and ``forward displacement'' simultaneously---but 3 limbs were fighting the direction of travel.
+\end{failbox}
+
+\subsection{v6: Per-Limb Directional Consistency (Final)}
+
+The asymmetry fix required computing each EE's individual contribution to forward motion:
+
+\begin{lstlisting}[language=Python, caption={Per-limb directional consistency.}]
+# Compute per-EE velocity in world X
+ee_fwd_vels = []
+for name in EE_SITES:
+    sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name)
+    jacp = np.zeros((3, model.nv))
+    mujoco.mj_jacSite(model, data, jacp, None, sid)
+    ee_vel_x = jacp[0] @ data.qvel  # X component
+    ee_fwd_vels.append(ee_vel_x)
+
+# Penalize limbs moving backward during stance
+backward_penalty = sum(max(0, -v) for v in ee_fwd_vels if v < 0)
+\end{lstlisting}
+
+\begin{fixbox}
+All four limbs now push in the same direction. The symmetry-breaking failure was resolved. Forward velocity became consistent and sustained.
+\end{fixbox}
+
+\subsection{Complete Final Reward}
+
+\begin{equation}
+\boxed{
+\begin{aligned}
+r_{\text{final}} = &\ 50 \cdot \Delta x^+ && \text{(displacement)} \\
+  &+ 2 \cdot \mathbb{1}[\text{lifting}] + 2 \cdot \text{fairness} + 0.5 \cdot \mathbb{1}[\text{cycle}] && \text{(limb cycling)} \\
+  &- 3 \cdot \mathbb{1}[\text{all\_down}] - \text{lazy} - 3 \cdot \mathbb{1}[\text{airborne}] && \text{(anti-exploit)} \\
+  &- 5|v_z| - 2(h-h_0)^2 - \text{backward} && \text{(anti-jump, anti-asymmetry)} \\
+  &+ 0.5(r_h + r_\text{belly} + r_\text{align}) + 0.1 && \text{(stability)} \\
+  &- 0.3|v_y| - 0.3|\dot\psi| - 0.001E - 0.02\|\Delta a\|^2 && \text{(regularization)}
+\end{aligned}
+}
+\end{equation}
+
+\fbox{\parbox{0.85\textwidth}{\centering\vspace{3cm}
+\textit{[IMAGE: 6-panel reward evolution diagram---each panel shows version, exploit, and fix.\\
+Arrows connect versions. Red for exploits, green for fixes. \\
+Show progression from v1 (cumulative) through v6 (directional consistency).]}
+\vspace{3cm}}}
+
+\subsection{Meta-Lesson: Adversarial Reward Design}
+
+\begin{insightbox}
+For every positive reward term, ask: \textit{``What is the laziest/cheapest way to maximize this?''} Then penalize that behavior.
+
+\vspace{4pt}\small
+\begin{tabular}{ll}
+\textbf{If you reward:} & \textbf{The agent will:} \\
+Cumulative distance & Move once, then stop \\
+Instantaneous velocity & Jerk back-and-forth \\
+``Any limb lifted'' & Use only the strongest limbs \\
+Large displacement (no constraints) & Jump \\
+``All limbs lift'' (no direction constraint) & One limb forward, three backward \\
+\end{tabular}
+\end{insightbox}
+
+%═══════════════════════════════════════════════════════════════════
+\section{The Final System: Triangle CPG + RL}
+%═══════════════════════════════════════════════════════════════════
+
+\subsection{Architecture}
+
+\begin{verbatim}
+                    RL Agent (8D corrections)
+                           |
+                           v
+  Triangle CPG  --->  [base + correction]  --->  PD Controller  --->  MuJoCo
+  (8 joint targets)         |                    (soft gains)        Physics
+                     joint limit clamp
+\end{verbatim}
+
+The CPG provides the base gait pattern. RL adds small corrections ($\pm 0.15$ rad) per limb. The PD controller tracks the combined targets using soft crawling gains. The CPG handles ``what motion,'' RL handles ``how to adapt.''
+
+\subsection{Key Parameters (Post-Search)}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Parameter} & \textbf{Sine (Attempt 6)} & \textbf{Triangle (Final)} \\
+\midrule
+Frequency & 0.5 Hz & 1.5--2.0 Hz \\
+Swing ratio & 25\% & 20\% \\
+Pitch amplitude & 0.15 rad & 0.30 rad \\
+Bend amplitude & 0.15 rad & 0.20 rad \\
+Waveform & Sinusoidal & Piecewise linear \\
+$K_p$ (crawl) & $3\times$ (too stiff) & $1\times$ \\
+Damping & 3.0 (too high) & 0.5 \\
+\bottomrule
+\end{tabular}
+\caption{Parameter evolution from sine to triangle gait.}
+\end{table}
+
+\subsection{Observation Space (33D)}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Component} & \textbf{Dims} & \textbf{Purpose} \\
+\midrule
+Pelvis quaternion & 4 & Orientation awareness \\
+Angular velocity & 3 & Spin detection \\
+Linear velocity & 3 & Speed + direction \\
+Active joint positions & 8 & Limb state \\
+Active joint velocities & 8 & Limb dynamics \\
+EE contact states & 4 & Gait phase awareness \\
+Gait clock (sin, cos) & 2 & Phase synchronization \\
+Pelvis height & 1 & Height maintenance \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Episode Structure}
+
+\begin{enumerate}[nosep]
+\item \textbf{Spawn} at computed height with spider pose.
+\item \textbf{Settle} (2 s): gravity ramp with stiff PD. Switch to soft gains.
+\item \textbf{Blend} (150 steps): linear blend from settled pose $\rightarrow$ CPG targets.
+\item \textbf{Crawl} (up to 1500 steps): triangle CPG + RL corrections.
+\end{enumerate}
+
+%═══════════════════════════════════════════════════════════════════
+\section{Results}
+%═══════════════════════════════════════════════════════════════════
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Metric} & \textbf{Value} & \textbf{Target} \\
+\midrule
+Episode survival & 1500/1500 steps & $\geq$1000 \\
+Forward velocity & 0.05--0.15 m/s & $>$0 (sustained) \\
+Pelvis height & 0.15--0.18 m & $>$0.05 m \\
+Torso-ground contact & Never & Never \\
+Leg crawling & \textcolor{successgreen}{Yes---visible cycling} & Yes \\
+Arm participation & \textcolor{successgreen}{Yes---all 4 limbs cycle} & Yes \\
+Jumping & \textcolor{successgreen}{Eliminated} & None \\
+Directional consistency & \textcolor{successgreen}{All limbs same direction} & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\fbox{\parbox{0.85\textwidth}{\centering\vspace{2.5cm}
+\textit{[IMAGE: 4--6 sequential MuJoCo frames showing one gait cycle.\\Label swing vs.\ stance per limb. Show forward displacement.]}
+\vspace{2.5cm}}}
+
+\fbox{\parbox{0.85\textwidth}{\centering\vspace{2.5cm}
+\textit{[IMAGE: Training curves: (1) episode reward, (2) per-limb lift counts, (3) forward velocity.]}
+\vspace{2.5cm}}}
+
+\subsection{Stages of Success}
+
+\begin{enumerate}[nosep]
+\item \textbf{Stage 0} (achieved): Static spider stand, body elevated, all EEs grounded.
+\item \textbf{Stage 1} (achieved): Legs produce crawling motion, some forward displacement.
+\item \textbf{Stage 2} (achieved): All 4 limbs cycle, sustained forward velocity, no jumping.
+\item \textbf{Stage 3} (future): Robust crawling with directional control and sim-to-real transfer.
+\end{enumerate}
+
+%═══════════════════════════════════════════════════════════════════
+\section{Tools Developed}
+%═══════════════════════════════════════════════════════════════════
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Tool / Mode} & \textbf{Purpose} \\
+\midrule
+\texttt{g1\_viewer.py} & Tkinter pose editor with joint sliders \\
+\texttt{g1\_stand.py --mode hold} & PD hold test (verify physics) \\
+\texttt{g1\_stand.py --mode hold\_debug} & Per-joint saturation analysis \\
+\texttt{g1\_crawl.py --mode sine/triangle} & Watch gait without RL \\
+\texttt{g1\_crawl.py --mode tune} & Real-time slider GUI for gait parameters \\
+\texttt{g1\_crawl.py --mode search} & Brute-force 324 sign combinations \\
+\texttt{g1\_crawl.py --mode test} & Random agent diagnostic (must be positive reward) \\
+\texttt{g1\_crawl.py --mode train} & PPO training with checkpoints \\
+\texttt{g1\_crawl.py --mode eval --video} & Evaluation with MP4 recording \\
+\texttt{diag\_friction.py} & Friction diagnostic and fix tool \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+%═══════════════════════════════════════════════════════════════════
+\section{Key Lessons}
+%═══════════════════════════════════════════════════════════════════
+
+\begin{enumerate}
+\item \textbf{Physics first, RL second.} Every failed RL run traced to a physics problem: friction, gains, contacts, spawn height. Never ``just train more.''
+
+\item \textbf{The random agent test.} Before every training run: does a random agent survive full episodes with positive reward? If not, fix the environment.
+
+\item \textbf{Two-gain architecture.} Stiff for settling, soft for motion. Neither alone works for both.
+
+\item \textbf{Triangle $>$ sine for locomotion.} Sine waves waste energy decelerating at extremes. Triangle/piecewise waveforms give constant-velocity segments and fast direction changes.
+
+\item \textbf{Automate sign search.} 324 combinations $\times$ 5 seconds each = 5 minutes. Don't guess.
+
+\item \textbf{Reward exploits are inevitable.} Cumulative progress $\rightarrow$ stop-and-collect. Per-step velocity $\rightarrow$ jerk. Lifting reward $\rightarrow$ legs-only. Large displacement $\rightarrow$ jumping. All-limb lifting $\rightarrow$ asymmetric direction. Each exploit required a specific counter-mechanism.
+
+\item \textbf{Per-limb directional consistency.} It's not enough that all limbs move---they must all push in the same direction.
+
+\item \textbf{The simplest solution wins.} We arrived at 8 DOF and triangle waves after trying 21D control, IK chains, CPGs with wrong signs, and imitation learning. The final system has fewer moving parts than any failed attempt.
+\end{enumerate}
+
+%═══════════════════════════════════════════════════════════════════
+\section{Future Directions}
+%═══════════════════════════════════════════════════════════════════
+
+\begin{enumerate}[nosep]
+\item \textbf{Higher velocity:} Asymmetric stance timing, unlocking hip roll for lateral push.
+\item \textbf{Directional control:} Target heading in observation, train on randomized directions.
+\item \textbf{Terrain robustness:} Domain randomization over friction, slope, roughness.
+\item \textbf{Sim-to-real:} Actuator delay, observation noise, mass randomization.
+\item \textbf{GPU training:} Current CPU-only setup limits throughput.
+\end{enumerate}
+
+%═══════════════════════════════════════════════════════════════════
+\section{Conclusion}
+%═══════════════════════════════════════════════════════════════════
+
+Making a humanoid robot crawl like a spider is a problem where the difficulty hides in the details. The RL algorithm (PPO) was never the bottleneck. The bottlenecks were friction modeling, contact geometry, PD tuning, spawn initialization, gait waveform shape, sign conventions, and---above all---reward engineering.
+
+The project required seven major iterations and six reward revisions. Each failure was designed to address the specific exploit of the previous version. The final system---a triangle-wave CPG with 8D RL corrections, fast-swing/slow-stance asymmetry, per-limb fairness enforcement, anti-jumping constraints, and directional consistency penalties---produces sustained forward crawling with all four limbs cycling through swing and stance phases.
+
+The most important lesson: \textbf{the simplest architecture that could possibly work is the right starting point.} We got there after trying IK chains, 21D direct control, imitation learning, and sinusoidal CPGs. The final system is simpler than all of them.
+
+%═══════════════════════════════════════════════════════════════════
+\appendix
+\section{Physics Configuration}
+
+\begin{lstlisting}[language=Python, title={Two-gain configuration}]
+# SETTLING (stiff)              # CRAWLING (soft)
+kp = torque_limit * 3.0         kp = torque_limit * 1.0
+kd = kp * 0.3                   kd = kp * 0.1
+dof_damping = 3.0                dof_damping = 0.5
+# Both phases:
+model.opt.timestep = 0.002;  model.opt.iterations = 50
+model.opt.solver = 2  # Newton
+geom_friction = [3.0, 0.5, 0.5]  # all colliding geoms
+\end{lstlisting}
+
+\section{File Inventory}
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{File} & \textbf{Purpose} \\
+\midrule
+\texttt{g1\_stand.py} & Spider stand: hold, debug, train, eval, test \\
+\texttt{g1\_crawl.py} & Spider crawl: sine, triangle, tune, search, train, eval, test, video \\
+\texttt{g1\_viewer.py} & Tkinter pose editor \\
+\texttt{g1\_crawl\_ref.py} & IK-based reference generator (used in Attempt 4) \\
+\texttt{diag\_friction.py} & Friction diagnostic \\
+\texttt{g1\_pose.txt} & Spider pose joint angles \\
+\texttt{summary.md} & Running development log \\
+\texttt{main.tex / main.pdf} & This report \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\end{document}
