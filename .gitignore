@@ -1,6 +1,7 @@
 .venv
 humanoid/
 unitree_ros/
+report/
 models/
 *.npz
 *.mp4
